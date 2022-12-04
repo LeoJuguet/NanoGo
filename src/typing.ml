@@ -103,26 +103,27 @@ let evar v = { expr_desc = TEident v; expr_typ = v.v_typ }
 
 let new_var =
   let id = ref 0 in
-  fun x loc ?(used=false) ty ->
+  fun x loc ?(used=false) ?(depth=0) ty ->
     incr id;
-    { v_name = x; v_id = !id; v_loc = loc; v_typ = ty; v_used = used; v_addr = 0; v_depth = 0 }
+    { v_name = x; v_id = !id; v_loc = loc; v_typ = ty; v_used = used; v_addr = 0; v_depth = depth }
 
 module Env = struct
   module M = Map.Make(String)
   type t = var M.t
   let empty = M.empty
   let find = M.find
-  let add env v = M.add v.v_name v env
+  let add env v = M.update v.v_name (fun x -> Some v) env
 
   let all_vars = ref []
   let check_unused () =
     let check v =
-      if v.v_name <> "_" && (* TODO used *) v.v_used then error v.v_loc "unused variable" in
+      if v.v_name <> "_" && (* TODO used *) not v.v_used then error v.v_loc ("unused variable "^v.v_name) in
     List.iter check !all_vars
 
+  let depth = ref 0
 
   let var x loc ?used ty env =
-    let v = new_var x loc ?used ty in
+    let v = new_var x loc ?used ~depth:(!depth) ty in
     all_vars := v :: !all_vars;
     add env v, v
 
@@ -176,16 +177,8 @@ and expr_desc env loc = function
   | PEunop (Uamp, e1) ->
     (* TODO Ok*)
      begin
-       let expr1, rt = expr env e1 in
-       let var = match expr1.expr_desc with
-         | TEident v -> v
-         | _ -> error loc "variable is expected"
-       in
-       try
-         let v = Env.find var.v_name env in
-         TEunop(Uamp,expr1), Tptr v.v_typ, false
-       with Not_found -> error loc "variable didn't exist"
-          | _ -> error loc "error with &"
+       let e, ty,rt = expr_lvalue env e1.pexpr_loc e1.pexpr_desc in
+       TEunop(Uamp,make e ty),Tptr ty, false
      end
   | PEunop (Uneg | Unot | Ustar as op, e1) ->
     (* TODO Ok*)
@@ -261,9 +254,16 @@ and expr_desc env loc = function
      (* TODO *)
      TEnil, Tptr Twild ,false
   | PEident {id=id} ->
-     (* TODO *) (try
-         let v = Env.find id env in TEident v, v.v_typ, false
-      with Not_found -> error loc ("unbound variable " ^ id))
+     (* TODO *)
+     begin
+       if id = "_" then error loc "cannot use _ as value"
+       else
+       let exp1, ty1, rt1 = expr_lvalue env loc (PEident {id=id;loc=loc})
+       in (match exp1 with
+          | TEident v -> v.v_used <- true
+          | _ -> ());
+       exp1, ty1, false
+     end
   | PEdot (e, id) ->
      (* TODO *)
      begin
@@ -289,7 +289,7 @@ and expr_desc env loc = function
   | PEassign (lvl, el) ->
      (* TODO *)
      begin
-       let vl = List.map (fun x -> fst (expr env x)) lvl in
+       let vl = List.map (fun e -> let exp1,ty1,rt1 = expr_lvalue env e.pexpr_loc e.pexpr_desc in make exp1 ty1) lvl in
        let exl = List.map (fun x -> fst (expr env x)) el in
        (match exl with
          [] -> error loc "expression is expected"
@@ -314,87 +314,113 @@ and expr_desc env loc = function
   | PEblock el ->
      (* TODO *)
      begin
-       if el = [] then (TEblock [], tvoid, false)
-       else begin
-           let (expr1,rt1), nenv =  match el with
-             | [] -> assert false
-             | {pexpr_desc = PEvars (idl,tyo,pexprl); pexpr_loc = locvars} :: ql -> begin
-                 let exprl = List.map (fun x -> fst (expr env x)) pexprl in
-                 match tyo,exprl with
-                   | None, [] -> error locvars "Unknow type for variables"
-                   | None, [{expr_desc = TEcall (fn,exprfl); expr_typ = tyl}] ->
-                      begin
-                        (*if List.length fn.fn_typ <> List.length idl then error locvars "Wrong number of variable";*)
-                        let new_env = ref env in
-                        try
-                          let varl = List.map2 (fun id ty ->
-                                         let tenv, var = Env.var id.id id.loc ty !new_env
-                                         in new_env := tenv; var) idl fn.fn_typ
-                          in (stmt (TEvars(varl,exprl)),false), !new_env
-                        with Invalid_argument _-> error locvars ("The function "^ fn.fn_name^" is of type "^string_of_type_list fn.fn_typ^" but "^string_of_int (List.length idl) ^" variables are defined")
-                      end
-                   | None, _ ->
-                      begin
-                        if List.length exprl <> List.length idl then error locvars ("The "^string_of_int (List.length idl)^" variables defined do not correspond to the "^string_of_int (List.length exprl)^" expressions");
-                        let new_env = ref env in
-                        let varl = List.map2 (fun id expr->
-                                       let tenv, var = Env.var id.id id.loc expr.expr_typ !new_env in
-                                       new_env := tenv; var) idl exprl
-                        in (stmt (TEvars(varl,exprl)),false), !new_env
-                      end
-                   | Some ty, [] ->
-                      begin
-                        let new_env = ref env in
-                        let varl = List.map (fun id -> let tenv,var = Env.var id.id id.loc (type_type ty) !new_env
-                                     in new_env := tenv; var) idl
-                        in (stmt (TEvars(varl,[])),false), !new_env
-                      end
-                   | Some ty, [{expr_desc = TEcall (fn, exprl); expr_typ = tyl}]->
-                      begin
-                        if List.length fn.fn_typ <> List.length idl then error loc "Wrong number of variable";
-                        if not (List.for_all (fun x -> x = type_type ty) fn.fn_typ) then error locvars "Wrong type of funcion return";
-                        let new_env = ref env in
-                        let varl = List.map2 (fun id expr ->
-                                       let tenv, var = Env.var id.id id.loc expr.expr_typ !new_env
-                                       in new_env := tenv; var) idl exprl
-                        in (stmt (TEvars(varl,exprl)),false), !new_env
-                      end
-                   | Some x,_ ->
-                      begin
-                        if List.length exprl <> List.length idl then error locvars "Wrong number of varaible and expression";
-                        let new_env = ref env in
-                        let varl = List.map2 (fun id expr->
-                                       if type_type x <> expr.expr_typ then error locvars "Type sepciefied and expression type didn't match";
-                                       let tenv, var = Env.var id.id id.loc expr.expr_typ !new_env in
-                                       new_env := tenv; var) idl exprl
-                        in (stmt (TEvars(varl,exprl)),false), !new_env
-                      end
-               end
-             | e::ql -> expr env e , env
-           in
-           match el with
-           |[] -> assert false
-           | e::[] -> TEblock [expr1], tvoid, rt1
-           | e::ql -> if rt1 then error loc "instruction never executed"
-                      else
-                        let expr2,ty,rt2 = expr_desc nenv loc (PEblock ql) in
-                        let exprl = match expr2 with
-                          | TEblock q -> q
-                          | _ -> error loc "impossible ?" in
-                        TEblock (expr1::exprl), tvoid, rt2
-         end
+       incr Env.depth;
+       let block_rt = ref false in
+       let _,eexpl = List.fold_left_map (fun nenv ex ->
+                         let exp1, rt1 = expr nenv ex in
+                         block_rt := rt1 || !block_rt;
+                         match exp1.expr_desc with
+                         | TEvars(vl,el) -> List.fold_left (fun nnenv v ->
+                                                if v.v_name = "_" then nnenv
+                                                else Env.add nnenv v) nenv vl, exp1
+                         | _ -> nenv , exp1
+                       ) env el in
+       decr Env.depth;
+       TEblock eexpl, tvoid, !block_rt
      end
   | PEincdec (e, op) ->
      (* TODO ok*)
      begin
-       let expr1, _ = expr env e in
-       match expr1.expr_desc, expr1.expr_typ with
-         | TEident _, Tint -> TEincdec(expr1,op), tvoid, false
-         | TEident _, _ -> error loc "type int is expected"
-         | _, _ -> error loc "variable is expected"
+       let expr1,ty1,rt1 = expr_lvalue env e.pexpr_loc e.pexpr_desc in
+       match ty1 with
+         | Tint -> TEincdec(make expr1 ty1,op), tvoid, false
+         | _ -> error loc "type int is expected"
      end
-  | PEvars _ ->
-     (* TODO *) error loc "variables must be defined in a block"
+  | PEvars (idl,oty,pexpl) ->
+     (* TODO *)
+     begin
+       let expl = List.map (fun e -> fst (expr env e)) pexpl in
+       let nenv = ref env in
+       let tyl = simplify_expr_list_typ expl in
+       let vl = match oty,tyl with
+         | None, [] -> error loc "No information available for type variables, please add a type or an expression"
+         | None, tyl ->
+            begin
+              try
+                List.map2 (fun id ty ->
+                    try
+                      if id.id = "_" then Env.find id.id !nenv
+                      else
+                        let v = Env.find id.id !nenv in
+                        if v.v_depth = !Env.depth then
+                          error loc ("The variable "^id.id^" already exist in this block")
+                        else raise Not_found
+                    with Not_found ->
+                      let ne,v = Env.var id.id id.loc ~used:true ty !nenv
+                      in nenv := ne; v) idl tyl
+              with Invalid_argument _ -> error loc ("The "^string_of_int (List.length idl)^" variables defined do not correspond to the "^string_of_int (List.length tyl)^" expressions")
+            end
+         | Some x, [] ->
+            begin
+              let ty = type_type x in
+              List.map (fun id ->
+                  try
+                    if id.id = "_" then Env.find id.id !nenv
+                      else
+                        let v = Env.find id.id !nenv in
+                        if v.v_depth = !Env.depth then
+                          error loc ("The variable "^id.id^" already exist in this block")
+                        else raise Not_found
+                  with Not_found ->
+                    let ne,v = Env.var id.id id.loc ty !nenv
+                    in nenv := ne; v) idl
+            end
+         | Some x, tyl ->
+            let tyf = type_type x in
+            begin
+              try
+                List.map2 (fun id ty ->
+                    if not (eq_type tyf ty) then error loc ("The expression type is "^string_of_type_list tyl^" but the expression must only contain the type "^string_of_type tyf);
+                    try
+                      if id.id = "_" then Env.find id.id !nenv
+                      else
+                        let v = Env.find id.id !nenv in
+                        if v.v_depth = !Env.depth then
+                          error loc ("The variable "^id.id^" already exist in this block")
+                        else raise Not_found
+                    with Not_found ->
+                      let ne,v = Env.var id.id id.loc ~used:true ty !nenv
+                      in nenv := ne; v) idl tyl
+              with Invalid_argument _ -> error loc ("The "^string_of_int (List.length idl)^" variables defined do not correspond to the "^string_of_int (List.length tyl)^" expressions")
+            end
+       in
+       TEvars(vl,expl),tvoid,false
+     end
+and expr_lvalue env loc = function
+    | PEunop (Ustar, e1) ->
+       begin
+         let expr1, rt = expr env e1 in
+         if expr1.expr_desc <> TEnil then
+           match expr1.expr_typ with
+             | Tptr ty -> TEunop (Ustar, expr1), ty, false
+             | _ -> error loc "The expected expression must be a pointer"
+         else error loc "The expected expression must not be nil"
+       end
+    | PEdot(e1,id) ->
+       begin
+         let _, _, _ = expr_lvalue env e1.pexpr_loc e1.pexpr_desc in
+         expr_desc env loc (PEdot(e1,id))
+       end
+    | PEident id ->
+       begin
+         try
+           if id.id = "_" then error loc "bien ou pas ?";
+           let v = Env.find id.id env in
+           (*v.v_used <- true;*)
+           TEident v, v.v_typ, false
+         with Not_found -> error loc ("unbound variable " ^ id.id)
+       end
+    | _ -> error loc "l-value is expected"
 
 
 let found_main = ref false
@@ -464,15 +490,18 @@ let decl = function
   | PDfunction { pf_name={id; loc}; pf_body = e; pf_typ=tyl } ->
     (* TODO check name and type *)
     let f = EnvF.find id !envf  in
-    let env = ref Env.empty in
+    let env = ref (fst(Env.var "_" loc Twild Env.empty)) in
     Env.fn := f;
     List.iter (fun v -> env := Env.add !env v) f.fn_params;
     let e, rt = expr !env e in
     if f.fn_name = "main" then begin
         if rt then error loc "main has return but not return is expected";
-        if e.expr_typ <> tvoid then error loc "main";
-        if f.fn_params <> [] then error loc "main params";
-        if f.fn_typ <> [] then error loc "main type void";
+        if not (eq_type e.expr_typ tvoid) then error loc "main must be of type void";
+        if f.fn_params <> [] then error loc "main don't take parameters";
+        if f.fn_typ <> [] then error loc "main don't take any type";
+      end
+    else begin
+        if not rt && f.fn_typ <> [] then error loc ("The function "^id^" may never return but it must return a type "^string_of_type_list f.fn_typ)
       end;
     TDfunction (f, e)
   | PDstruct {ps_name={id}} ->
