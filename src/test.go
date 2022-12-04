@@ -15,5 +15,5 @@ func main() {
 	fmt.Print(t.a, t.b, "\n");
 	bar(&t)
 	fmt.Print(t.a, t.b, "\n");
-	fmt.Print("5" + 37);
+	fmt.Print("5" , 37);
 }

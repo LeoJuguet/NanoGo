@@ -1,21 +1,26 @@
 
 EXE=_build/default/main.exe
 
+TESTS=../tests/*.go
+
 all: $(EXE)
 
 $(EXE): *.ml*
 	dune build @all
-	cp $(EXE) ngoc 
+	cp $(EXE) ngoc
 
-test: $(EXE) test.go
-	./ngoc --debug test.go
-	gcc -g -no-pie test.s -o test
-	./test
-	go run test.go
+test: $(EXE) $(TESTS)
+	echo test
 
-export-%:
-	cp test.go ../tests/exec/$*.go
-	go run test.go > ../tests/exec/$*.out
+%.go:
+	./ngoc --debug --type-only $*.go
+	#gcc -g -no-pie $*.s -o $*
+	#$*
+	#go run $*.go
+
+#export-%:
+#	cp test.go ../tests/exec/$*.go
+#	go run test.go > ../tests/exec/$*.out
 
 .PHONY: clean
 clean:
