@@ -29,11 +29,10 @@ module EnvS = struct
 
   let all_structs = ref []
 
-  let struc x envs=
+  let add_struc x envs=
     let struc = new_struct x in
     all_structs := struc :: ! all_structs;
     add envs struc;
-    struc
 end
 
 let envs = ref EnvS.empty
@@ -77,6 +76,8 @@ let rec eq_type ty1 ty2 = match ty1, ty2 with
   | Tstruct s1, Tstruct s2 -> s1 == s2
   | Tptr ty1, Tptr ty2 -> eq_type ty1 ty2
   | Tmany ty1, Tmany ty2 -> List.for_all2 eq_type ty1 ty2
+  | Tmany [ty1], ty2 -> eq_type ty1 ty2
+  | ty1, Tmany [ty2] -> eq_type ty1 ty2
   | Twild, _ | _, Twild -> true
   | _ -> false
     (* TODO autres types *)
@@ -88,6 +89,7 @@ let rec string_of_type = function
     | Tptr x -> "*"^string_of_type x
     | Tstruct st -> st.s_name
     | Tmany [] -> "void"
+    | Tmany [ty] -> string_of_type ty
     | Tmany lt -> "Tmany ("^string_of_type_list lt^")"
     | _ -> "unknow_type"
 
@@ -166,18 +168,21 @@ and expr_desc env loc = function
          | Badd | Bsub | Bmul | Bdiv | Bmod -> Tint, Tint
          | Beq | Bne -> if expr1.expr_desc <> TEnil then expr1.expr_typ, Tbool
                         else if expr2.expr_desc <> TEnil then expr2.expr_typ, Tbool
-                        else error loc "both variables are nil"
+                        else error loc "both expressions are nil, but at least one non-nil expression is required"
          | Blt | Bgt | Ble | Bge-> Tint, Tbool
        in
        if eq_type expr1.expr_typ expr2.expr_typ then
          if eq_type expr1.expr_typ type_in then (TEbinop(op,expr1,expr2), type_out, false)
-         else error loc ("wrong type for binary operation")
-       else error loc "The two expressions must be of the same type"
+         else error loc ("The expressions are of type "^string_of_type expr1.expr_typ^" and "^string_of_type expr2.expr_typ^" but expressions of type "^string_of_type type_in^" are expected")
+       else error loc ("The expressions are of type "^string_of_type expr1.expr_typ^" and "^string_of_type expr2.expr_typ^" but expressions of the same type are expected")
      end
   | PEunop (Uamp, e1) ->
     (* TODO Ok*)
      begin
        let e, ty,rt = expr_lvalue env e1.pexpr_loc e1.pexpr_desc in
+       (match e with
+       | TEident v -> v.v_used <- true;
+       | _ -> ());
        TEunop(Uamp,make e ty),Tptr ty, false
      end
   | PEunop (Uneg | Unot | Ustar as op, e1) ->
@@ -196,10 +201,11 @@ and expr_desc env loc = function
        in
        if eq_type expr1.expr_typ type_in then
          (TEunop(op, expr1), type_out, false)
-       else error loc "wrong type for unit operation"
+       else error loc ("The expressions is of type"^string_of_type expr1.expr_typ^" but expressions of the type "^string_of_type type_in ^"is expected")
     end
   | PEcall ({id = "fmt.Print"}, el) ->
     (* TODO Ok*)
+     if not !fmt_imported then error loc "fmt used but not imported";
      let lt = List.map (fun x->fst (expr env x)) el in
      fmt_used := true;
      TEprint lt, tvoid, false
@@ -223,10 +229,12 @@ and expr_desc env loc = function
        let exprl = List.map (fun e -> fst (expr env e)) el
        in
            try
-           if List.for_all2 (fun ety v-> eq_type ety v.v_typ)
-               (simplify_expr_list_typ exprl) fn.fn_params
-            then TEcall(fn,exprl),Tmany fn.fn_typ, false
-           else raise (Invalid_argument "")
+             if List.length exprl > 0 && List.length fn.fn_params = 0 then error loc ("too many arguments in call to g")
+             else
+               if List.for_all2 (fun ety v-> eq_type ety v.v_typ)
+                    (simplify_expr_list_typ exprl) fn.fn_params
+               then TEcall(fn,exprl),Tmany fn.fn_typ, false
+               else raise (Invalid_argument "")
            with Invalid_argument _ -> error loc ("The function "^id.id^" has parameters of type "^string_of_type_list (List.map (fun v -> v.v_typ) fn.fn_params)^" but function is call with type "^string_of_type_list (List.map (fun x -> x.expr_typ) exprl));
      end
   | PEfor (e, b) ->
@@ -236,7 +244,7 @@ and expr_desc env loc = function
            expr2,rt2 = expr env b in
        if expr1.expr_typ = Tbool then
          TEfor(expr1,expr2), tvoid, false
-       else error loc "bool is expected for condition"
+       else error loc ("The condition is of type "^string_of_type expr1.expr_typ^" but a bool type is required in the condition of the for")
      end
   | PEif (e1, e2, e3) ->
      (* TODO *)
@@ -248,7 +256,7 @@ and expr_desc env loc = function
                expr3, rt3 = expr env e3 in
            TEif(expr1,expr2,expr3), tvoid, rt2 && rt3 (*change ty*)
          end
-       else error loc "wrong type for if condition, bool is expected"
+       else error loc ("The condition is of type "^string_of_type expr1.expr_typ^" but a bool type is required in the condition of the if")
      end
   | PEnil ->
      (* TODO *)
@@ -260,7 +268,7 @@ and expr_desc env loc = function
        else
        let exp1, ty1, rt1 = expr_lvalue env loc (PEident {id=id;loc=loc})
        in (match exp1 with
-          | TEident v -> v.v_used <- true
+          | TEident v -> v.v_used <- true (*commenter si utiliser = avoir été défini*)
           | _ -> ());
        exp1, ty1, false
      end
@@ -271,7 +279,7 @@ and expr_desc env loc = function
        match expr1.expr_typ with
          | Tptr (Tstruct st) -> begin
             if expr1.expr_desc = TEnil then
-              error loc "expression is nil but pointer not nul is expected"
+              error loc "expression is nil but pointer not nil is expected"
             else
               try
                 let field = Hashtbl.find st.s_fields id.id in
@@ -284,7 +292,7 @@ and expr_desc env loc = function
                TEdot(expr1,field),field.f_typ, false
              with Not_found -> error loc ("field "^id.id^" didn't exist in structure "^st.s_name)
            end
-         | _ -> error loc "the expression must be a structure"
+         | _ -> error loc ("The expression is of type "^string_of_type expr1.expr_typ^" but a structure is expected")
      end
   | PEassign (lvl, el) ->
      (* TODO *)
@@ -292,13 +300,20 @@ and expr_desc env loc = function
        let vl = List.map (fun e -> let exp1,ty1,rt1 = expr_lvalue env e.pexpr_loc e.pexpr_desc in make exp1 ty1) lvl in
        let exl = List.map (fun x -> fst (expr env x)) el in
        (match exl with
-         [] -> error loc "expression is expected"
+          [] -> error loc "expression is expected"
        | [{expr_desc = TEcall(fn,exprfl); expr_typ = typex}] ->
-            List.iter2 (fun v ty -> if not (eq_type v.expr_typ ty) then
-                                      error loc ("The "^string_of_type v.expr_typ^" type of the variable and the "^string_of_type ty^" type of the output of the function "^fn.fn_name ^" do not match")) vl fn.fn_typ
-       | _ -> List.iter2 (fun v e -> if not (eq_type v.expr_typ e.expr_typ) then
-                                       error loc "variables and expressions types didn't match") vl exl);
-       TEassign (vl, exl), tvoid, false
+          begin
+            try
+              List.iter2 (fun v ty -> if not (eq_type v.expr_typ ty) then
+                                        raise (Invalid_argument "" ) ) vl fn.fn_typ
+            with Invalid_argument _ -> error loc ("The "^string_of_type_list (List.map (fun v -> v.expr_typ) vl)^" type of the variable and the "^string_of_type_list fn.fn_typ^" type of the output of the function "^fn.fn_name ^" do not match")
+          end
+       | _ ->
+            try
+              List.iter2 (fun v e -> if not (eq_type v.expr_typ e.expr_typ) then
+                                       raise (Invalid_argument "" )) vl exl
+       with Invalid_argument _ -> error loc ("The "^string_of_type_list (List.map (fun v -> v.expr_typ) vl)^" type of the variable and the "^string_of_type_list (List.map (fun e -> e.expr_typ) exl)^" type of the output of the expression do not match"));
+                                  TEassign (vl, exl), tvoid, false
      end
   | PEreturn el ->
      (* TODO Ok*)
@@ -337,26 +352,29 @@ and expr_desc env loc = function
          | _ -> error loc "type int is expected"
      end
   | PEvars (idl,oty,pexpl) ->
-     (* TODO *)
+     (* TODO change repetition of code*)
      begin
-       let expl = List.map (fun e -> fst (expr env e)) pexpl in
+       let expl = List.map (fun e -> let ex = fst (expr env e)
+                             in if ex.expr_desc = TEnil then
+                               error loc "use of untyped nil"
+                             else ex) pexpl in
        let nenv = ref env in
        let tyl = simplify_expr_list_typ expl in
        let vl = match oty,tyl with
-         | None, [] -> error loc "No information available for type variables, please add a type or an expression"
+         | None, [] -> error loc "No information to type the variable(s), please add a type or an expression"
          | None, tyl ->
             begin
               try
                 List.map2 (fun id ty ->
                     try
-                      if id.id = "_" then Env.find id.id !nenv
+                      let v = Env.find id.id !nenv in
+                      if id.id = "_" then v
                       else
-                        let v = Env.find id.id !nenv in
                         if v.v_depth = !Env.depth then
-                          error loc ("The variable "^id.id^" already exist in this block")
+                          error loc (id.id^" redeclared in this block previous declaration at line "^string_of_int ((fst v.v_loc).pos_lnum))
                         else raise Not_found
                     with Not_found ->
-                      let ne,v = Env.var id.id id.loc ~used:true ty !nenv
+                      let ne,v = Env.var id.id id.loc ~used:false ty !nenv
                       in nenv := ne; v) idl tyl
               with Invalid_argument _ -> error loc ("The "^string_of_int (List.length idl)^" variables defined do not correspond to the "^string_of_int (List.length tyl)^" expressions")
             end
@@ -389,7 +407,7 @@ and expr_desc env loc = function
                           error loc ("The variable "^id.id^" already exist in this block")
                         else raise Not_found
                     with Not_found ->
-                      let ne,v = Env.var id.id id.loc ~used:true ty !nenv
+                      let ne,v = Env.var id.id id.loc ~used:false ty !nenv
                       in nenv := ne; v) idl tyl
               with Invalid_argument _ -> error loc ("The "^string_of_int (List.length idl)^" variables defined do not correspond to the "^string_of_int (List.length tyl)^" expressions")
             end
@@ -406,7 +424,7 @@ and expr_lvalue env loc = function
              | _ -> error loc "The expected expression must be a pointer"
          else error loc "The expected expression must not be nil"
        end
-    | PEdot(e1,id) ->
+    | PEdot(e1,id)     ->
        begin
          let _, _, _ = expr_lvalue env e1.pexpr_loc e1.pexpr_desc in
          expr_desc env loc (PEdot(e1,id))
@@ -414,9 +432,8 @@ and expr_lvalue env loc = function
     | PEident id ->
        begin
          try
-           if id.id = "_" then error loc "bien ou pas ?";
            let v = Env.find id.id env in
-           (*v.v_used <- true;*)
+           (*v.v_used <- true;*) (*supprimer le commentaire si utiliser = avoir été défini*)
            TEident v, v.v_typ, false
          with Not_found -> error loc ("unbound variable " ^ id.id)
        end
@@ -430,8 +447,8 @@ let phase1 = function
   | PDstruct { ps_name = { id = id; loc = loc }} -> (* TODO *)
      begin
        try
-         let _ = EnvS.find id !envs in error loc "Structure already exist"
-       with Not_found -> let _ =  EnvS.struc id envs in ()
+         let _ = EnvS.find id !envs in error loc ("Structure "^id^" redeclared in this block")
+       with Not_found -> EnvS.add_struc id envs
      end
   | PDfunction _ -> ()
 
@@ -446,7 +463,7 @@ let phase2 = function
      (* TODO *)
      begin
        try
-         let _ = EnvF.find id !envf in error loc ("function "^id^" already exist")
+         let _ = EnvF.find id !envf in error loc ("function "^id^" redeclared in this block")
        with
          Not_found -> begin
            let rec variable_list paraml= match paraml with
@@ -523,7 +540,7 @@ let decl = function
 
 let file ~debug:b (imp, dl) =
   debug := b;
-  (* fmt_imported := imp; *)
+  fmt_imported := imp;
   List.iter phase1 dl;
   List.iter phase2 dl;
   if not !found_main then error dummy_loc "missing method main";
