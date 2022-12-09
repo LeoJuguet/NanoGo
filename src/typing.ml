@@ -27,11 +27,8 @@ module EnvS = struct
   let find = M.find
   let add envs struc = envs := M.add struc.s_name struc !envs
 
-  let all_structs = ref []
-
   let add_struc x envs=
     let struc = new_struct x in
-    all_structs := struc :: ! all_structs;
     add envs struc;
 end
 
@@ -50,11 +47,8 @@ module EnvF = struct
   let find = M.find
   let add envf fn = M.add fn.fn_name fn envf
 
-  let all_funcs = ref []
-
   let func x var ty envf=
     let fn = new_func x var ty in
-    all_funcs := fn :: !all_funcs;
     envf :=add !envf fn;
     fn
 end
@@ -278,7 +272,7 @@ and expr_desc env loc = function
        let expr1, rt1 = expr env e in
        match expr1.expr_typ with
          | Tptr (Tstruct st) -> begin
-            if expr1.expr_desc = TEnil then
+             if expr1.expr_desc = TEnil then
               error loc "expression is nil but pointer not nil is expected"
             else
               try
@@ -292,6 +286,7 @@ and expr_desc env loc = function
                TEdot(expr1,field),field.f_typ, false
              with Not_found -> error loc ("field "^id.id^" didn't exist in structure "^st.s_name)
            end
+         | _ when expr1.expr_desc = TEnil -> error loc "expression is nil but structure is expected"
          | _ -> error loc ("The expression is of type "^string_of_type expr1.expr_typ^" but a structure is expected")
      end
   | PEassign (lvl, el) ->
@@ -512,7 +507,6 @@ let decl = function
     List.iter (fun v -> env := Env.add !env v) f.fn_params;
     let e, rt = expr !env e in
     if f.fn_name = "main" then begin
-        if rt then error loc "main has return but not return is expected";
         if not (eq_type e.expr_typ tvoid) then error loc "main must be of type void";
         if f.fn_params <> [] then error loc "main don't take parameters";
         if f.fn_typ <> [] then error loc "main don't take any type";

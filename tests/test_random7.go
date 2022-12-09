@@ -11,5 +11,5 @@ func main(){
      var e *int;
      i = *e;
      var st *s;
-     i = nil.a;
+     i = st.a;
 }
