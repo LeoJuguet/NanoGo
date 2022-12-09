@@ -209,19 +209,21 @@ and expr_desc env loc = function
      fmt_used := true;
      TEprint lt, tvoid, false
   | PEcall ({id="new"}, [{pexpr_desc=PEident {id}}]) ->
-     let ty =
-          try
-            let st = EnvS.find id !envs in
-            Tstruct st
-          with Not_found -> match id with
-            | "int" -> Tint | "bool" -> Tbool | "string" -> Tstring
-            | _ -> error loc ("no such type " ^ id)
-     in TEnew ty, Tptr ty, false
+    if id = "_" then error loc "cannot use _ as value";
+    let ty =
+      try
+        let st = EnvS.find id !envs in
+        Tstruct st
+      with Not_found -> match id with
+        | "int" -> Tint | "bool" -> Tbool | "string" -> Tstring
+        | _ -> error loc ("no such type " ^ id)
+    in TEnew ty, Tptr ty, false
   | PEcall ({id="new"}, _) ->
      error loc "new expects a type"
   | PEcall (id, el) ->
      (* TODO *)
      begin
+       if id.id = "_" then error loc "cannot use _ as value";
        let fn = try EnvF.find id.id !envf
        with Not_found -> error loc ("unknown function "^id.id)
        in
