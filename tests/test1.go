@@ -6,4 +6,5 @@ func main() {
 	a = 5;
         b = 10;
         var c,d = a+b, a-b;
+	_,_ = c,d;
 }

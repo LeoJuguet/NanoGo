@@ -56,14 +56,19 @@ end
 let envf = ref EnvF.empty
 
 
-let rec type_type = function
-  | PTident { id = "int" } -> Tint
-  | PTident { id = "bool" } -> Tbool
-  | PTident { id = "string" } -> Tstring
+let rec type_type ty= match ty with
+  | PTident { loc = loc; id = ids} ->
+    begin
+      try Tstruct(EnvS.find ids !envs)
+      with Not_found -> match ty with
+      | PTident { id = "int" } -> Tint
+      | PTident { id = "bool" } -> Tbool
+      | PTident { id = "string" } -> Tstring
+      | PTident {id = id; loc = loc} -> error loc ("undefined: "^id)
+      | _ -> error dummy_loc "unknown error"
+    end
   | PTptr ty -> Tptr (type_type ty)
-  | PTident { loc = loc; id = ids} -> try Tstruct(EnvS.find ids !envs)
-                                      with Not_found -> error loc ("struture "^ids^" is undefined")
-  | _ -> error dummy_loc ("unknown struct ") (* TODO type structure *)
+   (* TODO type structure *)
 
 let rec eq_type ty1 ty2 = match ty1, ty2 with
   | Tint, Tint | Tbool, Tbool | Tstring, Tstring -> true
@@ -84,7 +89,7 @@ let rec string_of_type = function
     | Tstruct st -> st.s_name
     | Tmany [] -> "void"
     | Tmany [ty] -> string_of_type ty
-    | Tmany lt -> "Tmany ("^string_of_type_list lt^")"
+    | Tmany lt -> "("^string_of_type_list lt^")"
     | _ -> "unknow_type"
 
 and string_of_type_list = function
@@ -204,13 +209,13 @@ and expr_desc env loc = function
      fmt_used := true;
      TEprint lt, tvoid, false
   | PEcall ({id="new"}, [{pexpr_desc=PEident {id}}]) ->
-     let ty = match id with
-       | "int" -> Tint | "bool" -> Tbool | "string" -> Tstring
-       | _ -> (* TODO *)
+     let ty =
           try
             let st = EnvS.find id !envs in
             Tstruct st
-          with Not_found -> error loc ("no such type " ^ id)
+          with Not_found -> match id with
+            | "int" -> Tint | "bool" -> Tbool | "string" -> Tstring
+            | _ -> error loc ("no such type " ^ id)
      in TEnew ty, Tptr ty, false
   | PEcall ({id="new"}, _) ->
      error loc "new expects a type"
@@ -314,12 +319,13 @@ and expr_desc env loc = function
      (* TODO Ok*)
      begin
      let exprl = List.map (fun x->fst (expr env x)) el in
+     if List.length exprl > 0 && !(Env.fn).fn_typ = [] then error loc "too many arguments to return";
      try
-       if List.for_all2 (fun ex ty -> eq_type ex.expr_typ ty)
-            exprl !(Env.fn).fn_typ then
-       TEreturn exprl, tvoid, true
+       if List.for_all2 (fun tyex ty -> eq_type tyex ty)
+           (simplify_expr_list_typ exprl) !(Env.fn).fn_typ then
+         TEreturn exprl, tvoid, true
        else raise (Invalid_argument "")
-     with Invalid_argument _ -> error loc ("The function "^ !(Env.fn).fn_name^" is of type "^string_of_type_list !(Env.fn).fn_typ^" but a type "^string_of_type_list (List.map (fun x -> x.expr_typ) exprl)^" is returned")
+     with Invalid_argument _ -> error loc ("The function "^ !(Env.fn).fn_name^" is of type "^string_of_type_list !(Env.fn).fn_typ^" but a type "^string_of_type_list (simplify_expr_list_typ exprl)^" is returned")
      end
   | PEblock el ->
      (* TODO *)
