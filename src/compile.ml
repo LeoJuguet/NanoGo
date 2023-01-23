@@ -489,7 +489,7 @@ let rec expr env e = match e.expr_desc with
     end
   | TEnew ty ->
      (* TODO code pour new S *)
-      allocz (sizeof ty)
+      malloc (sizeof ty)
       ++ movq !%rax !%rdi
   | TEcall (f, el) ->
      (* TODO code pour appel fonction *)

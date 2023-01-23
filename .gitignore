@@ -1,0 +1,6 @@
+*.pdf
+_build/
+*.o
+*.s
+
+*.pdf
