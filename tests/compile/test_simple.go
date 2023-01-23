@@ -82,6 +82,87 @@ func test_assign_multiple(){
 	fmt.Print(a,b,"\n")
 }
 
+func test_assign__(){
+	var _, a = f(5,6);
+	_,_ = 5,5;
+	a,_=f(a,a);
+	fmt.Print(a,"\n");
+}
+
+func test_op(){
+	if 5 > 6{
+		fmt.Print("> : erreur \n")
+	}
+	if 6 > 5{
+		fmt.Print("> : ok \n")
+	}
+	if 5 > 5{
+		fmt.Print("> : erreur \n")
+	}
+	if 5 >= 6{
+		fmt.Print(">= : erreur \n")
+	}
+	if 6 >= 5{
+		fmt.Print(">= : ok \n")
+	}
+	if 5 >= 5{
+		fmt.Print(">= : ok \n")
+	}
+	if 5 < 6{
+		fmt.Print("< : ok \n")
+	}
+	if 6 < 5{
+		fmt.Print("< : erreur \n")
+	}
+	if 5 < 5{
+		fmt.Print("< : erreur \n")
+	}
+	if 5 <= 6{
+		fmt.Print("<= : ok \n")
+	}
+	if 6 <= 5{
+		fmt.Print("<= : erreur \n")
+	}
+	if 5 <= 5{
+		fmt.Print("<= : ok \n")
+	}
+	if 5 == 6{
+		fmt.Print("== : erreur \n")
+	}
+	if 6 == 5{
+		fmt.Print("== : erreur \n")
+	}
+	if 5 == 5{
+		fmt.Print("== : ok \n")
+	}
+	if 5 != 6{
+		fmt.Print("!= : ok \n")
+	}
+	if 6 != 5{
+		fmt.Print("!= : ok \n")
+	}
+	if 5 != 5{
+		fmt.Print("!= : erreur \n")
+	}else{
+		fmt.Print("else : ok \n")
+	}
+
+}
+
+func test_for(){
+	for i := 0; i < 10; i++{
+		fmt.Print(i,"\n")
+	}
+}
+
+func test_while(){
+	var i = 0;
+	for i < 10{
+		fmt.Print(i,"\n")
+		i++
+	}
+}
+
 func main(){
 	facti := factorielle_i(5);
 	factr := factorielle_r(5);
@@ -102,4 +183,7 @@ func main(){
 	testS();
 	fmt.Print(nil, "\n")
 	test_assign_multiple()
+	test_assign__()
+	test_op()
+	test_for()
 }

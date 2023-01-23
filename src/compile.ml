@@ -254,9 +254,9 @@ let rec expr env e = match e.expr_desc with
     begin
       let i1 = expr env e1 in
       let i2 = expr env e2 in
-      let iop,ijmp = match op with
-        | Beq -> sete  , jne
-        | Bne -> setne , je
+      let iop,ijmp,sop = match op with
+        | Beq -> sete  , jne,setne
+        | Bne -> setne , je,sete
         | _ -> failwith "impossible"
       in
       let i = ref nop in
@@ -285,7 +285,10 @@ let rec expr env e = match e.expr_desc with
                       ++ movq (imm 0) !%rdi
                       ++ label end_lab
                      end
-      | Tstring -> call "compare_string" ++ movq !%rax !%rdi
+      | Tstring -> call "compare_string"
+                   ++ cmpq (imm 0) !%rax
+                   ++ sop !%dil
+                   ++ movzbq !%dil rdi
       | _ -> cmpq !%rdi !%rsi ++ iop !%dil ++ movzbq !%dil rdi
     end
   | TEunop (Uneg, e1) ->
@@ -406,28 +409,34 @@ let rec expr env e = match e.expr_desc with
         | TEvars (vl, el)-> begin
             match el with
             | [] -> begin
+                let rec get_type l = match l with
+                  | [] -> 8
+                  | {v_name = "_"}::q -> get_type q
+                  | t::q -> sizeof t.v_typ
+                in
+                let sizety = get_type vl in
                 let s =  (List.fold_right (fun v s ->
-                    env.size_local_variable := !(env.size_local_variable) + sizeof v.v_typ;
+                    env.size_local_variable := !(env.size_local_variable) + sizety;
                     v.v_addr <- - !(env.size_local_variable);
-                    s + sizeof v.v_typ) vl 0) in
+                    s + sizety) vl 0) in
                 let rec clear s =
                   if s = 0 then movq (imm 0) (ind ~ofs:0 rsp)
                   else movq (imm 0) (ind ~ofs:s rsp) ++ clear (s-8) in
                 subq (imm s)!%rsp
                 ++ clear (s-8)
               end
-            | [{expr_desc = TEcall _} as er] -> begin
-                let _ = List.fold_right (fun v s ->
-                    env.size_local_variable := !(env.size_local_variable) + sizeof v.v_typ;
+            | [{expr_desc = TEcall (f,_)} as er] -> begin
+                let _ = List.fold_right2 (fun v fty s ->
+                    env.size_local_variable := !(env.size_local_variable) + sizeof fty;
                     v.v_addr <- - !(env.size_local_variable);
-                    s - sizeof v.v_typ) vl 0 in
+                    s - sizeof fty) vl f.fn_typ 0 in
                 expr env er
               end
             | _ -> begin
-                let _ = List.fold_left (fun s v ->
-                    env.size_local_variable := !(env.size_local_variable) + sizeof v.v_typ;
+                let _ = List.fold_left2 (fun s v e->
+                    env.size_local_variable := !(env.size_local_variable) + sizeof e.expr_typ;
                     v.v_addr <- - !(env.size_local_variable);
-                    s - sizeof v.v_typ) 0 vl in
+                    s - sizeof e.expr_typ) 0 vl el in
                 List.fold_left (fun i e -> i ++ expr env e ++ push_typ rdi e.expr_typ) nop el
                 end
           end
@@ -660,14 +669,14 @@ let xcompare_string =
   ++ cmpq !%rdi !%rsi     (* test si rdi et rsi pointe la meme string *)
   ++ jz true_lab
   ++ label loop_lab
-  ++ movq (ind rdi) !%r10
-  ++ movq (ind rsi) !%r11
-  ++ cmpq !%r10 !%r11     (* test si les characteres sont les memes *)
+  ++ movb (ind rdi) !%r10b
+  ++ movb (ind rsi) !%r11b
+  ++ cmpb !%r10b !%r11b     (* test si les characteres sont les memes *)
   ++ jnz false_lab
-  ++ cmpq (imm 0) !%r10   (* test si on est a la fin de la string *)
+  ++ cmpb (imm 0) !%r10b   (* test si on est a la fin de la string *)
   ++ jz true_lab
-  ++ addq (imm 8) !%rdi   (*next char*)
-  ++ addq (imm 8) !%rdi
+  ++ addq (imm 1) !%rdi   (*next char*)
+  ++ addq (imm 1) !%rsi
   ++ jmp loop_lab
   ++ label true_lab
   ++ movq (imm 1) !%rax
@@ -692,7 +701,8 @@ let file ?debug:(b=false) dl =
       xprint_space ++
       xprint_bool ++
       xprint_hexa ++
-      xallocz
+      xallocz ++
+      xcompare_string
 ;
     data =
       label "S_int" ++ string "%ld" ++

@@ -497,14 +497,15 @@ let phase2 = function
      begin
        try
          let st = EnvS.find id !envs in
+         let i = ref 1 in
          List.iter (fun (idf,ty) ->
              try
                let _ = Hashtbl.find st.s_fields idf.id in
                error idf.loc ("The field "^idf.id^" is defined several times in the structure "^id)
              with Not_found ->
-               Hashtbl.add st.s_fields idf.id {f_name = idf.id;
+               (Hashtbl.add st.s_fields idf.id {f_name = idf.id;
                                                f_typ = type_type ty;
-                                               f_ofs = 0} ) fl
+                                               f_ofs = !i}; incr i )) fl
        with Not_found -> error dummy_loc "Structure not found"
      end
 
@@ -531,7 +532,8 @@ let decl = function
   | PDstruct {ps_name={id}} ->
      (* TODO *) (*let s = { s_name = id; s_fields = Hashtbl.create 5; s_size = 0 } in*)
      let rec no_recursive_and_size stl =
-       Hashtbl.fold (fun sf f s-> match f.f_typ with
+       (* tri les champs par ordre puis assigne leurs vrais positions *)
+       List.fold_left (fun s f-> match f.f_typ with
                                    | Tstruct fst->
                                       if List.exists (fun st -> fst.s_name = st.s_name) stl
                                       then error dummy_loc ("structure "^id^" is recursive, but struture can't be recursive")
@@ -539,8 +541,11 @@ let decl = function
                                           f.f_ofs <- s;
                                           s + no_recursive_and_size (fst::stl)
                                            end
-                                   | typ -> f.f_ofs <- s;  s + sizeof typ )
-         (List.hd stl).s_fields 0
+                                   | typ -> f.f_ofs <- s; s + sizeof typ )
+         0
+       (List.sort (fun x y -> compare x.f_ofs y.f_ofs)
+       (Hashtbl.fold (fun k v l -> v::l)
+         (List.hd stl).s_fields []))
      in let st = (EnvS.find id !envs) in
         st.s_size <- no_recursive_and_size [st];
         TDstruct st
