@@ -64,43 +64,74 @@ let empty_env =
 
 let mk_bool d = { expr_desc = d; expr_typ = Tbool }
 
-(* f reçoit le label correspondant à ``renvoyer vrai'' *)
+(** f reçoit le label correspondant à ``renvoyer vrai'' *)
 let compile_bool f =
   let l_true = new_label () and l_end = new_label () in
   f l_true ++
   movq (imm 0) (reg rdi) ++ jmp l_end ++
   label l_true ++ movq (imm 1) (reg rdi) ++ label l_end
 
+(** push le type dans rbegin*)
 let rec push_typ rbegin ty =
   let size = sizeof ty in
   if size = 8 then pushq !%rbegin
   else
     let i = ref nop in
-    for j = 0 to (size-1) / 8 do
-      i := !i ++ pushq (ind ~ofs:(-j*8) rbegin);
+    for j = (size / 8) - 1 downto 0 do
+      i := !i ++ pushq (ind ~ofs:(j*8) rbegin);
     done;
     !i
 
+(** move la valeur de rbegin dans rend *)
 let rec mov_typ rbegin rend ty =
   let size = sizeof ty in
-  if size = 8 then movq (ind rbegin) (ind rend)
+  if size = 8 then
+    movq !%rbegin (ind rend)
   else
     let i = ref nop in
-    for j = 0 to size / 8 do
-      i := !i ++ movq (ind ~ofs:(-j) rbegin) (ind ~ofs:(-j) rend);
+    for j = (size / 8) - 1 downto 0 do
+      i := !i
+           ++ movq (ind ~ofs:(j*8) rbegin) !%r11
+           ++ movq !%r11 (ind ~ofs:(j*8) rend);
     done;
     !i
 
+(** move la valeur a l'addresse rbegin dans rend *)
+let rec mov_addr_typ rbegin rend ty =
+  let size = sizeof ty in
+  if size = 8 then
+    movq (ind rbegin) !%r11
+    ++ movq !%r11  (ind rend)
+  else
+    let i = ref nop in
+    for j = (size / 8) - 1 downto 0 do
+      i := !i
+           ++ movq (ind ~ofs:(j*8) rbegin) !%r11
+           ++ movq !%r11 (ind ~ofs:(j*8) rend);
+    done;
+    !i
+
+(** move la valeur dans rdi *)
+let mov_rdi_typ rbegin ty =
+  let size = sizeof ty in
+  if size = 8 then
+    movq (ind rbegin) !%rdi
+  else push_typ rbegin ty ++ movq !%rsp !%rdi
+
+(** genere un print pour le type ty
+    Suppose que la valeur est dans la stack
+                             *)
 let rec print_type ty = match ty with
   | Tbool -> movq (ind ~ofs:0 rsp) !%rdi ++ call "print_bool"
   | Tint -> movq (ind ~ofs:0 rsp) !%rdi ++ call "print_int"
   | Tstring -> movq (ind ~ofs:0 rsp) !%rdi ++ call "print_string"
   | Tptr (Tstruct s)  -> leaq (lab "Samp") rdi
                         ++ call "print_string"
-                        ++ leaq (ind rsp) rdi
+                        ++ movq (ind rsp) !%rdi
                         ++ push_typ rdi (Tstruct s)
                         ++ print_type (Tstruct s)
                         ++ addq (imm (sizeof (Tstruct s))) !%rsp
+  | Tptr Twild -> leaq (lab "S_nil") rdi ++ call "print_string"
   | Tptr ptr_ty ->
     movq (ind ~ofs:0 rsp) !%rdi
     ++ call "print_hexa"
@@ -112,12 +143,13 @@ let rec print_type ty = match ty with
           (
             match t.f_typ with
             | Tint | Tstring | Tbool ->
-              pushq (ind ~ofs:(sizeof (Tstruct s) - t.f_ofs - 8) rsp)
+              pushq (ind ~ofs:(t.f_ofs) rsp)
               ++ print_type t.f_typ
               ++ addq (imm 8) !%rsp
             | Tptr _ -> movq (ind ~ofs:0 rsp) !%rdi
                         ++ call "print_hexa"
-            | fty ->  push_typ rdi fty
+            | fty -> leaq (ind ~ofs:t.f_ofs rsp) rdi
+                    ++ mov_rdi_typ rdi fty
                     ++ print_type fty
                     ++ addq (imm (sizeof fty)) !%rsp
             )
@@ -137,6 +169,8 @@ let rec print_type ty = match ty with
     end
   | Twild -> failwith "Not implemented"
   | Tmany l -> failwith "Not implemented"
+
+
 
 let rec expr env e = match e.expr_desc with
   | TEskip ->
@@ -188,9 +222,9 @@ let rec expr env e = match e.expr_desc with
         | Bge -> setge
         | _ -> failwith "impossible"
       in
-      i2
+      i1
       ++ pushq !%rdi
-      ++ i1
+      ++ i2
       ++ popq rsi
       ++ cmpq !%rdi !%rsi
       ++ iop !%dil
@@ -255,13 +289,11 @@ let rec expr env e = match e.expr_desc with
       | _ -> cmpq !%rdi !%rsi ++ iop !%dil ++ movzbq !%dil rdi
     end
   | TEunop (Uneg, e1) ->
-    (* TODO code pour negation ints *)
     begin
       expr env e1
       ++  negq !%rdi
     end
   | TEunop (Unot, e1) ->
-    (* TODO code pour negation bool *)
     begin
       expr env e1
       ++ notq !%rdi
@@ -269,41 +301,48 @@ let rec expr env e = match e.expr_desc with
   | TEunop (Uamp, e1) ->
     (* TODO code pour & *)
     begin
-      let addr = left_expr env e1 in
-      leaq (ind ~ofs:addr rbp) rdi
+      left_expr env e1
+      ++ leaq (ind rsi) rdi
     end
   | TEunop (Ustar, e1) ->
-    (* TODO code pour * *) assert false
+    (* TODO code pour * *)
+    left_expr env e ++ mov_rdi_typ rsi e.expr_typ
   | TEprint el ->
-    (* TODO code pour Print *)
-    (*List.fold_right (fun e i -> i ++ expr env e ++ print_type e.expr_typ) el nop*)
     begin
       let expr_ty = ref Tstring in
-      List.fold_right (fun e1 i ->
+      (match el with
+      | [{expr_desc = TEcall _ } as e1] -> expr env e1
+      | _ ->List.fold_right (fun e1 i ->
           i
           ++ expr env e1
-          ++ push_typ rdi e1.expr_typ )
+          ++ match e1.expr_typ with
+          | Tstring | Tint | Tbool | Twild | Tptr _ -> push_typ rdi e1.expr_typ
+          | Tstruct _ | Tmany _ -> nop)
         el nop
-      ++ List.fold_left (fun i e ->
+      )
+      ++ List.fold_left (fun i etyp ->
           i
           ++
           (if !expr_ty <> Tstring
-          && e.expr_typ <> Tstring then
-           (expr_ty := e.expr_typ; call "print_space")
-          else (expr_ty := e.expr_typ ; nop)
+          && etyp <> Tstring then
+           (expr_ty := etyp; call "print_space")
+          else (expr_ty := etyp ; nop)
          )
-          ++ print_type e.expr_typ
-          ++ addq (imm (sizeof e.expr_typ)) !%rsp; )
-       nop el
+          ++ print_type etyp
+          ++ addq (imm (sizeof etyp)) !%rsp; )
+       nop (match el with
+            | [{expr_typ = Tmany l}] -> l
+            | _ -> List.map (fun e -> e.expr_typ ) el)
         (* clean local variable *)
     end
 
   | TEident x ->
-    (* TODO code pour x *)
     begin
       match x.v_typ with
-      | Tstruct s -> leaq (ind ~ofs:(left_expr env e) rbp) rdi
-      | _ -> movq (ind ~ofs:(left_expr env e) rbp) !%rdi
+      | Tstring | Tbool | Tint | Tptr _ -> movq (ind ~ofs:x.v_addr rbp) !%rdi
+      | _ -> leaq (ind ~ofs:x.v_addr rbp) rsi
+             ++ mov_rdi_typ rsi x.v_typ
+             ++ movq !%rsp !%rdi
     end
   (*| TEassign ([{expr_desc=TEident x}], [e1]) ->
     (* TODO code pour x := e *) assert false *)
@@ -312,44 +351,94 @@ let rec expr env e = match e.expr_desc with
     begin
       let addr = left_expr env lv in
       expr env e1
-      ++ movq !%rdi (ind ~ofs:addr rbp)
+      ++ addr
+      ++ mov_typ rdi rsi e1.expr_typ
     end
-  | TEassign (_, _) ->
-      assert false
+  | TEassign (lv, el) ->
+        begin
+          let i1, s = List.fold_left (fun (i,s) e1 ->
+                i
+                ++ expr env e1
+                ++ (match e1.expr_typ with
+                    | Tint | Tbool | Tstring | Tptr _ -> pushq !%rdi
+                    |  _ -> nop
+                  ), s + sizeof e1.expr_typ
+            ) (nop,0) el
+          in
+          i1
+          ++ (match el with
+              (* functions *)
+              | [{expr_typ = Tmany lety}] ->
+                leaq (ind rsp) rdi
+                ++ List.fold_right2 (fun v ety i ->
+                    (match v.expr_desc with
+                    | TEident {v_name = "_"} -> nop
+                    | _ -> left_expr env v
+                           ++ mov_addr_typ rdi rsi ety)
+                           ++ addq (imm (sizeof ety)) !%rdi
+                           ++ i
+                  ) lv lety nop
+              (* expressions *)
+              | _ ->
+                leaq (ind ~ofs:(s) rsp) rdi
+                ++List.fold_right2 (fun v e i ->
+                    match v.expr_desc with
+                     | TEident {v_name = "_"} ->
+                       subq (imm (sizeof e.expr_typ)) !%rdi
+                       ++ i
+                     | _ ->
+                       left_expr env v
+                       ++ subq (imm (sizeof e.expr_typ)) !%rdi
+                       ++ mov_addr_typ rdi rsi e.expr_typ
+                       ++ i
+                ) lv el nop
+            )
+            (*delete right expression*)
+          ++ addq (imm s) !%rsp
+        end
   | TEblock el ->
      (* TODO code pour block *)
     begin
       let actual_size_local_variable = !(env.size_local_variable) in
-      let rec fold_block i e1 = match e1.expr_desc with
+      let rec fold_block i e1 =
+        i ++
+        match e1.expr_desc with
         | TEvars (vl, el)-> begin
-            i ++ match el with
+            match el with
             | [] -> begin
-                subq (imm (List.fold_right (fun v s ->
-                    v.v_addr <- - !(env.size_local_variable) - 8;
+                let s =  (List.fold_right (fun v s ->
                     env.size_local_variable := !(env.size_local_variable) + sizeof v.v_typ;
-                    s + sizeof v.v_typ) vl 0)) !%rsp
+                    v.v_addr <- - !(env.size_local_variable);
+                    s + sizeof v.v_typ) vl 0) in
+                let rec clear s =
+                  if s = 0 then movq (imm 0) (ind ~ofs:0 rsp)
+                  else movq (imm 0) (ind ~ofs:s rsp) ++ clear (s-8) in
+                subq (imm s)!%rsp
+                ++ clear (s-8)
               end
             | [{expr_desc = TEcall _} as er] -> begin
                 let _ = List.fold_right (fun v s ->
-                    v.v_addr <- - !(env.size_local_variable) - 8;
                     env.size_local_variable := !(env.size_local_variable) + sizeof v.v_typ;
+                    v.v_addr <- - !(env.size_local_variable);
                     s - sizeof v.v_typ) vl 0 in
                 expr env er
               end
             | _ -> begin
                 let _ = List.fold_left (fun s v ->
-                    v.v_addr <- - !(env.size_local_variable) - 8;
                     env.size_local_variable := !(env.size_local_variable) + sizeof v.v_typ;
+                    v.v_addr <- - !(env.size_local_variable);
                     s - sizeof v.v_typ) 0 vl in
                 List.fold_left (fun i e -> i ++ expr env e ++ push_typ rdi e.expr_typ) nop el
                 end
           end
-        | _ -> i ++ expr env e1
+        | _ -> expr env e1
       in
       let i1 = List.fold_left fold_block nop el in
+      let var_loc = !(env.size_local_variable) - actual_size_local_variable in
       i1
         (* clean local variable *)
-      ++ addq (imm (!(env.size_local_variable) - actual_size_local_variable)) !%rsp
+      ++ if var_loc <> 0 then addq (imm var_loc) !%rsp
+          else nop
     end
   | TEif (e1, e2, e3) ->
      (* TODO code pour if *)
@@ -360,6 +449,10 @@ let rec expr env e = match e.expr_desc with
       let i2 = expr env e2 in
       let i3 = expr env e3 in
       i1
+      ++ match e1.expr_desc with
+      | TEcall _ -> movq !%rsp !%rdi
+      | _ -> nop
+      ++ testq !%rdi !%rdi
       ++ jz lab_false
       ++ i2
       ++ jmp lab_endif
@@ -379,6 +472,10 @@ let rec expr env e = match e.expr_desc with
       ++ i2
       ++ label lab_cond
       ++ i1
+      ++ match e1.expr_desc with
+      | TEcall _ -> movq !%rsp !%rdi
+      | _ -> nop
+      ++ testq !%rdi !%rdi
       ++ jnz lab_loop
     end
   | TEnew ty ->
@@ -388,37 +485,52 @@ let rec expr env e = match e.expr_desc with
   | TEcall (f, el) ->
      (* TODO code pour appel fonction *)
     begin
+      let return_size = List.fold_left (fun s ty -> s + sizeof ty) 0 f.fn_typ in
+      let arg_size = List.fold_left (fun s v -> s + sizeof v.v_typ) 0 f.fn_params in
       (* resultats *)
-      subq (imm (List.fold_left (fun s ty -> s + sizeof ty) 0 f.fn_typ)) !%rsp
+      (if return_size <> 0 then subq (imm return_size) !%rsp
+      else nop)
       (* arguments *)
-      ++ List.fold_right (fun e1 i -> i ++ expr env e1 ++ push_typ rdi e1.expr_typ ) el nop
-      ++ call f.fn_name
+      ++ ( match el with
+          | [{expr_desc = TEcall _} as e1] -> expr env e1
+          | _ -> List.fold_right (fun e1 i -> i
+                                              ++ expr env e1
+                                              ++ match e1.expr_typ with
+                                              | Tstruct _ -> nop
+                                              | _ -> push_typ rdi e1.expr_typ
+                                 ) el nop
+         )
+      ++ call ("F_"^f.fn_name)
       (* efface les arguments *)
-      ++ addq (imm (List.fold_left (fun s v -> s + sizeof v.v_typ) 0 f.fn_params)) !%rsp
+      ++ (if arg_size <> 0 then addq (imm arg_size) !%rsp
+          else nop)
+      ++ (if return_size = 8 then movq (ind rsp) !%rdi
+          else nop)
     end
 
   | TEdot (e1, {f_ofs=ofs}) ->
      (* TODO code pour e.f *)
     begin
-      let addr = left_expr env e in
-      movq (ind ~ofs:addr rbp) !%rdi
+      left_expr env e
+      ++ movq (ind rsi) !%rdi
     end
   | TEvars _ ->
      assert false (* fait dans block *)
   | TEreturn [] ->
     (* TODO code pour return e *)
     jmp env.exit_label
-  | TEreturn [e1] ->
+  (*| TEreturn [e1] ->
     (* TODO code pour return e1,... *)
-    jmp env.exit_label
+    jmp env.exit_label*)
   | TEreturn el ->
      begin
        fst (List.fold_left (fun (i, pos) e ->
          (
            i
            ++ expr env e
-           ++ leaq (ind ~ofs:(pos+sizeof e.expr_typ) rbp) rsi
-           ++ mov_typ rdi rbp e.expr_typ , pos + sizeof e.expr_typ)
+           ++ leaq (ind ~ofs:pos rbp) rsi
+           ++ mov_typ rdi rsi e.expr_typ
+         , pos + sizeof e.expr_typ)
          )
            (nop, env.pos_return) el
          )
@@ -432,14 +544,22 @@ let rec expr env e = match e.expr_desc with
         | Inc -> incq
         | Dec -> decq
       in
-      iop (ind ~ofs:a1 rbp)
+      a1
+      ++ iop (ind rsi)
     end
-
+(** genere le code pour récupérer l'addresse de la l-value e *)
 and left_expr env e = match e.expr_desc with
-  | TEdot (e1,f1) -> (*leaq (ind ~ofs:-f1.f_ofs !%rsi) !%rsi*)
-    left_expr env e1 - f1.f_ofs
-  | TEunop (Ustar, e1) -> (*leaq !%rsi !%rsi*) left_expr env e1
-  | TEident v ->(*leaq (ind ~ofs:v.v_addr !%rbp) !%rsi*) v.v_addr
+  | TEdot (e1,f1) ->
+    begin
+      (match e1.expr_typ with
+      | Tptr _ -> left_expr env e1
+                  ++ movq (ind rsi) !%rsi
+      | _ ->left_expr env e1)
+      ++ leaq (ind ~ofs:f1.f_ofs rsi) rsi
+    end
+  | TEunop (Ustar, e1) -> left_expr env e1
+                          ++ movq (ind rsi) !%rsi
+  | TEident v -> leaq (ind ~ofs:v.v_addr rbp) rsi
   | _ -> failwith "not yet"
 
 let function_ f e =
@@ -452,7 +572,7 @@ let function_ f e =
     nb_locals = ref 0; (* maximum *)
     next_local= 0; (* 0, 1, ... *)
     size_local_variable= ref 0;
-    pos_return = List.fold_left (fun s v -> s + sizeof v.v_typ ) 8 f.fn_params;
+    pos_return = List.fold_left (fun s v -> s + sizeof v.v_typ ) 16 f.fn_params;
   }
   in
   label ("F_" ^ s)
@@ -461,15 +581,14 @@ let function_ f e =
   ++ expr env e
   ++ label env.exit_label
     (* delete local variable *)
-  ++ movq !%rbp !%rsp
-  ++ popq rbp
+  ++ leave
   ++ ret
 
 let decl code = function
   | TDfunction (f, e) -> code ++ function_ f e
   | TDstruct _ -> code
 
-
+(** fonction pour afficher un int*)
 let xprint_int =
   label "print_int"
   ++ movq !%rdi !%rsi
@@ -478,6 +597,7 @@ let xprint_int =
   ++ call "printf"
   ++ ret
 
+(** fonction pour afficher en hexadecimal (pour les pointeurs)*)
 let xprint_hexa =
   label "print_hexa"
   ++ movq !%rdi !%rsi
@@ -486,8 +606,7 @@ let xprint_hexa =
   ++ call "printf"
   ++ ret
 
-
-
+(** fonction pour afficher un booleen*)
 let xprint_bool =
   label "print_bool"
   ++ testq !%rdi !%rdi
@@ -501,6 +620,7 @@ let xprint_bool =
   ++ call "printf"
   ++ ret
 
+(** fonction pour afficher un string*)
 let xprint_string =
   label "print_string"
   ++ movq !%rdi !%rsi
@@ -509,6 +629,7 @@ let xprint_string =
   ++ call "printf"
   ++ ret
 
+(** fonction pour afficher un espace*)
 let xprint_space =
   label "print_space"
   ++ leaq (lab "Sspace") rdi
@@ -516,6 +637,21 @@ let xprint_space =
   ++ call "printf"
   ++ ret
 
+(** fonction pour allocz*)
+let xallocz =
+  label "allocz"
+  ++ movq !%rdi !%rbx
+  ++ call "malloc"
+  ++ testq !%rbx !%rbx
+  ++ jnz "alloc_zero"
+  ++ ret
+  ++ label "alloc_zero"
+  ++ movb (imm 0) (ind ~index:rbx rax)
+  ++ decq !%rbx
+  ++ jnz "alloc_zero"
+  ++ ret
+
+ (** fonction pour comparer l'égalite de deux string*)
 let xcompare_string =
   let false_lab = new_label () in
   let true_lab = new_label () in
@@ -524,11 +660,11 @@ let xcompare_string =
   ++ cmpq !%rdi !%rsi     (* test si rdi et rsi pointe la meme string *)
   ++ jz true_lab
   ++ label loop_lab
-  ++ movq (ind rdi) !%r12
+  ++ movq (ind rdi) !%r10
   ++ movq (ind rsi) !%r11
-  ++ cmpq !%r12 !%r11     (* test si les characteres sont les memes *)
+  ++ cmpq !%r10 !%r11     (* test si les characteres sont les memes *)
   ++ jnz false_lab
-  ++ cmpq (imm 0) !%r12   (* test si on est a la fin de la string *)
+  ++ cmpq (imm 0) !%r10   (* test si on est a la fin de la string *)
   ++ jz true_lab
   ++ addq (imm 8) !%rdi   (*next char*)
   ++ addq (imm 8) !%rdi
@@ -541,8 +677,6 @@ let xcompare_string =
   ++ ret
 
 
-
-
 let file ?debug:(b=false) dl =
   debug := b;
   (* TODO calcul offset champs *)
@@ -553,35 +687,12 @@ let file ?debug:(b=false) dl =
       xorq (reg rax) (reg rax) ++
       ret ++
       funs ++
-(*      inline "
-print_int:
-        movq    %rdi, %rsi
-        movq    $S_int, %rdi
-        xorq    %rax, %rax
-        call    printf
-        ret
-        "
-++*)
       xprint_int ++
-xprint_string
-++
-xprint_space
-++
-xprint_bool
-++
-xprint_hexa
-++
-label "allocz"
-  ++ movq !%rdi !%rbx
-  ++ call "malloc"
-  ++ testq !%rbx !%rbx
-  ++ jnz "alloc_zero"
-  ++ ret
-  ++ label "alloc_zero"
-  ++ movb (imm 0) (ind ~index:rbx rax)
-  ++ decq !%rbx
-  ++ jnz "alloc_zero"
-  ++ ret
+      xprint_string ++
+      xprint_space ++
+      xprint_bool ++
+      xprint_hexa ++
+      xallocz
 ;
     data =
       label "S_int" ++ string "%ld" ++

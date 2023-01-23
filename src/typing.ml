@@ -234,7 +234,9 @@ and expr_desc env loc = function
              else
                if List.for_all2 (fun ety v-> eq_type ety v.v_typ)
                     (simplify_expr_list_typ exprl) fn.fn_params
-               then TEcall(fn,exprl),Tmany fn.fn_typ, false
+               then TEcall(fn,exprl),(match fn.fn_typ with
+                   | ty::[] -> ty
+                   | _ ->Tmany fn.fn_typ), false
                else raise (Invalid_argument "")
            with Invalid_argument _ -> error loc ("The function "^id.id^" has parameters of type "^string_of_type_list (List.map (fun v -> v.v_typ) fn.fn_params)^" but function is call with type "^string_of_type_list (List.map (fun x -> x.expr_typ) exprl));
      end
@@ -455,9 +457,10 @@ let phase1 = function
      end
   | PDfunction _ -> ()
 
-let sizeof = function
+let rec sizeof = function
   | Tint | Tbool | Tstring | Tptr _ -> 8
   | Tstruct st -> st.s_size
+  | Tmany el -> List.fold_left (fun s e -> s + sizeof e) 0 el
   | _ -> (* TODO *) assert false
 
 (* 2. declare functions and type fields *)
@@ -512,7 +515,9 @@ let decl = function
     let f = EnvF.find id !envf  in
     let env = ref (fst(Env.var "_" loc Twild Env.empty)) in
     Env.fn := f;
-    List.iter (fun v -> env := Env.add !env v) f.fn_params;
+    let _ = List.fold_left (fun pos v -> v.v_addr <- pos;
+                     env := Env.add !env v;
+                   v.v_addr + sizeof v.v_typ) 16 f.fn_params in
     let e, rt = expr !env e in
     if f.fn_name = "main" then begin
         if not (eq_type e.expr_typ tvoid) then error loc "main must be of type void";
