@@ -39,16 +39,12 @@ type S struct{
 }
 ```
 Est représenté comme suit :
-+---+
-| c |
-+---+
+|:-:|
+| c | 
 | b |
-+---+
 | a | <- pointeur vers la structure
-+---+
 
-
-
+- Le test d'égalité sur les structure est un test de valeur et non de positions.
 
 # Différence avec le sujet
 
@@ -90,3 +86,5 @@ func main(){
 }
 ```
 Pour régler ce problème une passe suplémentaire pourrait être envisagée afin de savoir si une référence de la variable peut être retourné. Si une référence de la variable peut être retourné alors elle doit être stockée dans le tas.
+
+

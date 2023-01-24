@@ -69,7 +69,7 @@ func testS() {
 	nns.sp = ns
 	fmt.Print(nns,"\n")
 	var r R;
-	r.s = "chiant ce truc"
+	r.s = "autre test de truc"
 	r.st = nns
 	fmt.Print(r,"\n")
 }

@@ -254,42 +254,63 @@ let rec expr env e = match e.expr_desc with
     begin
       let i1 = expr env e1 in
       let i2 = expr env e2 in
-      let iop,ijmp,sop = match op with
-        | Beq -> sete  , jne,setne
-        | Bne -> setne , je,sete
+      let iop,sop, (nstt,nstf,jop) = match op with
+        | Beq -> sete  , setne,(1,0,je)
+        | Bne -> setne , sete,(0,1,jne)
         | _ -> failwith "impossible"
       in
-      let i = ref nop in
       let ty = if e1.expr_typ == Twild then e2.expr_typ
         else e1.expr_typ in
-            i2
-      ++ pushq !%rdi
-      ++ i1
-      ++ popq rsi
-      ++ match ty with
+     let rec compare_ty ty = match ty with
       | Tstruct s -> begin
                       let end_lab = new_label () in
                       let false_lab = new_label () in
-                      let n = sizeof ty in
-                      for j = 0 to n/8 do
-                        i := !i
-                             ++ cmpq !%rdi !%rsi
-                             ++ ijmp false_lab
-                             ++ subq (imm 8) !%rdi
-                             ++ subq (imm 8) !%rsi
-                      done;
-                      !i
-                      ++ movq (imm 1) !%rdi
+                      let sorted_fields = List.sort (fun y x -> compare x.f_ofs y.f_ofs)
+          (Hashtbl.fold (fun k v l -> v::l) s.s_fields []) in
+                      let i = List.fold_left (fun ins f ->
+                          ins
+                        ++ pushq !%rdi
+                        ++ pushq !%rsi
+                        ++ (match f.f_typ with
+                        | Tstruct s -> leaq (ind ~ofs:f.f_ofs rdi) rdi
+                                        ++ leaq (ind ~ofs:f.f_ofs rsi) rsi
+                        | _ -> movq (ind ~ofs:f.f_ofs rdi) !%rdi
+                                 ++ movq (ind ~ofs:f.f_ofs rsi) !%rsi)
+                        ++ compare_ty f.f_typ
+                        ++ popq rsi
+                        ++ popq rdi
+                        ++ testq !%r9 !%r9
+                        ++ jop false_lab
+                        ) nop sorted_fields in
+                       i
+                      ++ movq (imm nstt) !%r9
                       ++ jmp end_lab
                       ++ label false_lab
-                      ++ movq (imm 0) !%rdi
+                      ++ movq (imm nstf) !%r9
                       ++ label end_lab
                      end
-      | Tstring -> call "compare_string"
-                   ++ cmpq (imm 0) !%rax
-                   ++ sop !%dil
-                   ++ movzbq !%dil rdi
-      | _ -> cmpq !%rdi !%rsi ++ iop !%dil ++ movzbq !%dil rdi
+      | Tstring -> pushq !%rdi
+                   ++ pushq !%rsi
+                   ++ call "compare_string"
+                   ++ popq rsi
+                   ++ popq rdi
+                   ++ testq !%rax !%rax
+                   ++ sop !%r9b
+                   ++ movzbq !%r9b r9
+
+      | _ -> cmpq !%rdi !%rsi ++ iop !%r9b ++ movzbq !%r9b r9
+      in
+               i2
+      ++ pushq !%rdi
+      ++ i1
+      ++ (match ty with
+      | Tstruct s -> movq (ind ~ofs:(sizeof ty) rsp) !%rsi
+      | _ -> popq rsi)
+      ++ compare_ty ty
+      ++ movq !%r9 !%rdi
+      ++ match ty with
+      | Tstruct s -> addq (imm (2 * (sizeof ty) + 8)) !%rsp
+      | _ -> nop
     end
   | TEunop (Uneg, e1) ->
     begin
